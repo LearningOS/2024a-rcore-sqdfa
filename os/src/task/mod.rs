@@ -16,11 +16,14 @@ mod task;
 
 use crate::loader::{get_app_data, get_num_app};
 use crate::sync::UPSafeCell;
+use crate::timer:: get_time_us;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
 use lazy_static::*;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
+use crate::mm::{VirtAddr,VirtPageNum,MapPermission};
+use crate::config::MAX_SYSCALL_NUM;
 
 pub use context::TaskContext;
 
@@ -78,6 +81,7 @@ impl TaskManager {
     fn run_first_task(&self) -> ! {
         let mut inner = self.inner.exclusive_access();
         let next_task = &mut inner.tasks[0];
+        next_task.start_time=get_time_us();
         next_task.task_status = TaskStatus::Running;
         let next_task_cx_ptr = &next_task.task_cx as *const TaskContext;
         drop(inner);
@@ -140,6 +144,9 @@ impl TaskManager {
             let mut inner = self.inner.exclusive_access();
             let current = inner.current_task;
             inner.tasks[next].task_status = TaskStatus::Running;
+            if inner.tasks[next].start_time==0{
+                inner.tasks[next].start_time=get_time_us();
+            }
             inner.current_task = next;
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
@@ -152,6 +159,91 @@ impl TaskManager {
         } else {
             panic!("All applications completed!");
         }
+    }
+
+    /// mmap
+    fn mmap(& self,_start: usize, _len: usize, _port: usize)->isize{
+        
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let  mset= &mut inner.tasks[current].memory_set;
+
+        let end=_start+_len;
+        //println!("sys_map,start;{},end:{}",_start,end);
+        //let fl=PTEFlags::from_bits(_port as u8).unwrap();
+    
+        let mut start: VirtPageNum=VirtAddr::from(_start as usize).floor();
+        let end: VirtPageNum=VirtAddr::from(end as usize).ceil();
+        //println!("sys_map,start;{},end:{}",start.0,end.0);
+        // check confic
+        while start.0<end.0{
+            if let Some(pte)=mset.translate(start){
+                //println!("[map] find pte for {}, value: {:b}",start.0,pte.bits);
+                if pte.bits==0{
+                    start.0 += 1;
+                    continue;
+                }
+                return -1;
+            }
+            //mset.insert_framed_area(start_va, end_va, permission);
+            start.0 += 1;
+        }
+        let pm=match _port {
+            1=>MapPermission::R| MapPermission::U,
+            2=>MapPermission::W | MapPermission::U,
+            3=>MapPermission::R | MapPermission::W | MapPermission::X| MapPermission::U,
+            _=>return -1
+        };
+        mset.insert_framed_area(VirtAddr::from(_start as usize), VirtAddr::from(_start+_len as usize), pm);
+        0
+    }
+
+     /// unmmap
+     fn munmap(& self,_start: usize, _len: usize)->isize{
+        
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let  mset= &mut inner.tasks[current].memory_set;
+
+        let end=_start+_len;
+        //println!("sys_map,start;{},end:{}",_start,end);
+        //let fl=PTEFlags::from_bits(_port as u8).unwrap();
+    
+        let mut start: VirtPageNum=VirtAddr::from(_start as usize).floor();
+        let end: VirtPageNum=VirtAddr::from(end as usize).ceil();
+        //println!("sys_munmap,start;{},end:{}",start.0,end.0);
+        while start.0<end.0{
+            if let Some(pte)=mset.translate(start){
+                //println!("[unmap] find pte for {}, value: {:b}",start.0,pte.bits);
+                if pte.bits==0{
+                    return -1; 
+                }
+            }else {
+                //println!("can't find pte for {}",start.0);
+                return -1;
+            }
+            //mset.insert_framed_area(start_va, end_va, permission);
+            start.0 += 1;
+        }
+        if !mset.shrink_start_to(VirtAddr::from(_start as usize), VirtAddr::from(_start+_len as usize)){
+            //println!("shrink err");
+            return -1;
+        }
+        0
+    }
+
+    /// get syscall times
+    pub fn get_sys_info(&self)->(TaskStatus, [u32; MAX_SYSCALL_NUM],usize){
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        (inner.tasks[current].task_status,inner.tasks[current].syscall_times,get_time_us()-inner.tasks[current].start_time)
+    }
+
+    /// add
+    pub fn add_sys_times(&self,id:usize){
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].syscall_times[id]+=1;
     }
 }
 
@@ -201,4 +293,24 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// mmap
+pub fn mmap(_start: usize, _len: usize, _port: usize)->isize{
+    TASK_MANAGER.mmap(_start, _len, _port)
+}
+
+/// mmap
+pub fn munmap(_start: usize, _len: usize)->isize{
+    TASK_MANAGER.munmap(_start, _len)
+}
+
+/// get system call times
+pub fn get_sys_info()->(TaskStatus, [u32; MAX_SYSCALL_NUM],usize){
+    TASK_MANAGER.get_sys_info()
+}
+
+/// add
+pub fn add_sys_times(id:usize){
+    TASK_MANAGER.add_sys_times(id);
 }

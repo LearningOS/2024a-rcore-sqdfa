@@ -171,3 +171,41 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
     }
     v
 }
+
+/// mmap
+pub fn mmap(token:usize,_start: usize, _len: usize, _port: usize)->isize{
+    let end=_start+_len;
+    //println!("sys_map,start;{},end:{}",_start,end);
+    let mut pt=PageTable::from_token(token);
+    let fl=PTEFlags::from_bits(_port as u8).unwrap();
+    
+    
+    let mut start: VirtPageNum=VirtAddr::from(_start as usize).floor();
+    let end: VirtPageNum=VirtAddr::from(end as usize).ceil();
+    println!("sys_map,start;{},end:{}",start.0,end.0);
+
+    while start.0<end.0 {
+        if let Some(pte)=pt.translate(start){
+            println!("find pte for {},value:{:b}",start.0,pte.bits);
+           if pte.is_valid(){
+            return -1;
+           }else {
+               panic!("errrrrrrrrrrrrrr")
+           }    
+        }
+        if let Some(f)=frame_alloc(){
+            println!("alloc:{}",start.0);
+            pt.map(start, f.ppn, fl);
+            pt.frames.push(f);
+            let pet=pt.translate(start).unwrap();
+            if !pet.is_valid(){
+                panic!("alloc fail")
+            }
+            println!("alloc pte value:{:b}",pet.bits);
+        }else {
+            return -1;
+        }
+        start.step();
+    }
+    return 0;
+}
