@@ -1,7 +1,7 @@
 //! Types related to task management & Functions for completely changing TCB
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT_BASE;
+use crate::config::{TRAP_CONTEXT_BASE,MAX_SYSCALL_NUM};
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
 use crate::trap::{trap_handler, TrapContext};
@@ -68,6 +68,18 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    ///start time
+    pub start_time:usize,
+
+    /// syscall times
+    pub syscall_times: [u32; MAX_SYSCALL_NUM],
+
+    ///pto
+    pub priority:isize,
+
+    ///
+    pub stride:usize
 }
 
 impl TaskControlBlockInner {
@@ -118,6 +130,10 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    priority:16,
+                    start_time:0,
+                    syscall_times:[0;MAX_SYSCALL_NUM],
+                    stride:0
                 })
             },
         };
@@ -191,6 +207,10 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    priority:16,
+                    start_time:0,
+                    syscall_times:[0;MAX_SYSCALL_NUM],
+                    stride:0
                 })
             },
         });
@@ -223,7 +243,7 @@ impl TaskControlBlock {
         let result = if size < 0 {
             inner
                 .memory_set
-                .shrink_to(VirtAddr(heap_bottom), VirtAddr(new_brk as usize))
+                .shrink_end_to(VirtAddr(heap_bottom), VirtAddr(new_brk as usize))
         } else {
             inner
                 .memory_set

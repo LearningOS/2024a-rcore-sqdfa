@@ -273,19 +273,56 @@ impl MemorySet {
 
     /// shrink the area to new_end
     #[allow(unused)]
-    pub fn shrink_to(&mut self, start: VirtAddr, new_end: VirtAddr) -> bool {
-        if let Some(area) = self
-            .areas
-            .iter_mut()
-            .find(|area| area.vpn_range.get_start() == start.floor())
-        {
-            area.shrink_to(&mut self.page_table, new_end.ceil());
-            true
-        } else {
-            false
+    pub fn shrink_end_to(&mut self, start: VirtAddr, new_end: VirtAddr) -> bool {
+        // if let Some(area) = self
+        //     .areas
+        //     .iter_mut()
+        //     .find(|area| area.vpn_range.get_start() == start.floor())
+        // {
+        //     area.shrink_to(&mut self.page_table, new_end.ceil());
+        //     true
+        // } else {
+        //     false
+        // }
+        for(idx,area) in self.areas.iter_mut().enumerate() {
+            if area.vpn_range.get_start() == start.floor(){
+                area.shrink_end_to(&mut self.page_table, new_end.ceil());
+                if area.vpn_range.get_end() ==new_end.ceil(){
+                    self.areas.remove(idx);
+                }
+                return true;
+            }
         }
+        false
     }
-
+ /// shrink the area to new_end,if no lefted,delete maparea
+ #[allow(unused)]
+ pub fn shrink_start_to(&mut self, start: VirtAddr, new_start: VirtAddr) -> bool {
+     // if let Some(area) = self
+     //     .areas
+     //     .iter_mut()
+     //     .find(|area| area.vpn_range.get_start() == start.floor())
+     // {
+     //     area.shrink_to(&mut self.page_table, new_end.ceil());
+     //     if area.vpn_range.get_end() ==new_end.ceil(){
+     //         println!("no lefted,delete maparea");
+            
+     //     }
+     //     true
+     // } else {
+     //     false
+     // }
+     for(idx,area) in self.areas.iter_mut().enumerate() {
+         if area.vpn_range.get_start() == start.floor(){
+             area.shrink_start_to(&mut self.page_table, new_start.floor());
+             if area.vpn_range.get_end() ==new_start.ceil(){
+                 self.areas.remove(idx);
+             }
+             return true;
+         }
+     }
+     false
+    }
     /// append the area to new_end
     #[allow(unused)]
     pub fn append_to(&mut self, start: VirtAddr, new_end: VirtAddr) -> bool {
@@ -365,11 +402,18 @@ impl MapArea {
         }
     }
     #[allow(unused)]
-    pub fn shrink_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {
+    pub fn shrink_end_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {
         for vpn in VPNRange::new(new_end, self.vpn_range.get_end()) {
             self.unmap_one(page_table, vpn)
         }
         self.vpn_range = VPNRange::new(self.vpn_range.get_start(), new_end);
+    }
+    #[allow(unused)]
+    pub fn shrink_start_to(&mut self, page_table: &mut PageTable, new_start: VirtPageNum) {
+        for vpn in VPNRange::new(self.vpn_range.get_start(), new_start) {
+            self.unmap_one(page_table, vpn)
+        }
+        self.vpn_range = VPNRange::new(new_start,self.vpn_range.get_end());
     }
     #[allow(unused)]
     pub fn append_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {

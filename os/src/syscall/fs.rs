@@ -50,3 +50,16 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
         }
     }
 }
+
+/// copy 
+pub fn copy_to_virt<T>(src: &T,dst:*mut T){
+    let src_buf_ptr: *const u8 = unsafe { core::mem::transmute(src)};
+    let dst_buf_ptr: *const u8 = unsafe { core::mem::transmute(dst)};
+    let len = core::mem::size_of::<T>();
+    let dst_buf = translated_byte_buffer(current_user_token(),dst_buf_ptr,len);
+    let mut offset =0;
+    for dst_one in dst_buf {
+        dst_one.copy_from_slice(unsafe {core::slice::from_raw_parts(src_buf_ptr.add(offset), dst_one.len())});
+        offset += dst_one.len();
+    }
+}

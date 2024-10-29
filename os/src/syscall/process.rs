@@ -4,12 +4,14 @@ use alloc::sync::Arc;
 use crate::{
     config::MAX_SYSCALL_NUM,
     loader::get_app_data_by_name,
-    mm::{translated_refmut, translated_str},
+    mm::{translated_refmut, translated_str,VirtAddr,VirtPageNum,MapPermission},
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next,
         suspend_current_and_run_next, TaskStatus,
     },
+    timer::get_time_us,
 };
+use super::fs::copy_to_virt;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -64,7 +66,7 @@ pub fn sys_fork() -> isize {
 }
 
 pub fn sys_exec(path: *const u8) -> isize {
-    trace!("kernel:pid[{}] sys_exec", current_task().unwrap().pid.0);
+    println!("kernel:pid[{}] sys_exec", current_task().unwrap().pid.0);
     let token = current_user_token();
     let path = translated_str(token, path);
     if let Some(data) = get_app_data_by_name(path.as_str()) {
@@ -118,11 +120,14 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
 pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+   
+    let t=get_time_us();
+    let nts=TimeVal{
+        sec:t/ 1_000_000,
+        usec:t% 1_000_000
+    };
+    copy_to_virt(&nts, _ts);
+    0
 }
 
 /// YOUR JOB: Finish sys_task_info to pass testcases
@@ -133,7 +138,19 @@ pub fn sys_task_info(_ti: *mut TaskInfo) -> isize {
         "kernel:pid[{}] sys_task_info NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    let s=inner.task_status;
+    let st=inner.syscall_times;
+    let t=inner.start_time;
+    let tsinfo=TaskInfo{
+        status:s,
+        syscall_times:st,
+        time:(get_time_us()-t)/ 1_000
+    };
+    drop(inner);
+    copy_to_virt(&tsinfo, _ti);
+    0
 }
 
 /// YOUR JOB: Implement mmap.
@@ -142,7 +159,34 @@ pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
         "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    if _start%4096!=0{
+        return -1;
+    }
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    let end=_start+_len;
+    let mut start: VirtPageNum=VirtAddr::from(_start as usize).floor();
+    let end: VirtPageNum=VirtAddr::from(end as usize).ceil();
+    while start.0<end.0{
+        if let Some(pte)=inner.memory_set.translate(start){
+            //println!("[map] find pte for {}, value: {:b}",start.0,pte.bits);
+            if pte.bits==0{
+                start.0 += 1;
+                continue;
+            }
+            return -1;
+        }
+        //mset.insert_framed_area(start_va, end_va, permission);
+        start.0 += 1;
+    }
+    let pm=match _port {
+        1=>MapPermission::R| MapPermission::U,
+        2=>MapPermission::W | MapPermission::U,
+        3=>MapPermission::R | MapPermission::W | MapPermission::X| MapPermission::U,
+        _=>return -1
+    };
+    inner.memory_set.insert_framed_area(VirtAddr::from(_start as usize), VirtAddr::from(_start+_len as usize), pm);
+    0
 }
 
 /// YOUR JOB: Implement munmap.
@@ -151,7 +195,35 @@ pub fn sys_munmap(_start: usize, _len: usize) -> isize {
         "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    if _start%4096!=0{
+        return -1;
+    }
+        //println!("sys_map,start;{},end:{}",_start,end);
+        //let fl=PTEFlags::from_bits(_port as u8).unwrap();
+        let task = current_task().unwrap();
+        let mut inner = task.inner_exclusive_access();
+        let end=_start+_len;
+        let mut start: VirtPageNum=VirtAddr::from(_start as usize).floor();
+        let end: VirtPageNum=VirtAddr::from(end as usize).ceil();
+        //println!("sys_munmap,start;{},end:{}",start.0,end.0);
+        while start.0<end.0{
+            if let Some(pte)=inner.memory_set.translate(start){
+                //println!("[unmap] find pte for {}, value: {:b}",start.0,pte.bits);
+                if pte.bits==0{
+                    return -1; 
+                }
+            }else {
+                //println!("can't find pte for {}",start.0);
+                return -1;
+            }
+            //mset.insert_framed_area(start_va, end_va, permission);
+            start.0 += 1;
+        }
+        if !inner.memory_set.shrink_start_to(VirtAddr::from(_start as usize), VirtAddr::from(_start+_len as usize)){
+            //println!("shrink err");
+            return -1;
+        }
+        0
 }
 
 /// change data segment size
@@ -166,12 +238,24 @@ pub fn sys_sbrk(size: i32) -> isize {
 
 /// YOUR JOB: Implement spawn.
 /// HINT: fork + exec =/= spawn
-pub fn sys_spawn(_path: *const u8) -> isize {
+pub fn sys_spawn(path: *const u8) -> isize {
     trace!(
         "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let token = current_user_token();
+    let path = translated_str(token, path);
+    if let Some(data) = get_app_data_by_name(path.as_str()) {
+        //let task = current_task().unwrap();
+        let current_task = current_task().unwrap();
+        let new_task = current_task.fork();
+        let new_pid=new_task.pid.0 as isize;
+        new_task.exec(data);
+        add_task(new_task);
+        return  new_pid;
+    } else {
+        return  -1;
+    }
 }
 
 // YOUR JOB: Set task priority.
@@ -180,5 +264,18 @@ pub fn sys_set_priority(_prio: isize) -> isize {
         "kernel:pid[{}] sys_set_priority NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    if _prio<2 {
+        return -1;
+    }
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+      inner.priority=_prio;  
+    _prio
+}
+
+// 
+pub fn add_syscall_num(syscall_id:usize){
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    inner.syscall_times[syscall_id]+=1;
 }
